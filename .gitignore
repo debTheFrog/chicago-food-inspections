@@ -1,0 +1,9 @@
+# RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.RDataTmp
+.Ruserdata
+
+# Dados (grandes e públicos; ver README)
+dados/
