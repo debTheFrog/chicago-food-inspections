@@ -53,11 +53,7 @@ inspecoes <- read_csv(
   progress  = FALSE
 )
 
-# ---- 5. Padronizar os nomes das colunas -----------------------
-# Ex.: "Inspection Date" -> inspection_date
-inspecoes <- clean_names(inspecoes)
-
-# ---- 6. Salvar ------------------------------------------------
+# ---- 5. Salvar ------------------------------------------------
 dir.create("dados/processados", recursive = TRUE, showWarnings = FALSE)
 saveRDS(inspecoes, "dados/processados/inspecoes_lidas.rds")
 
