@@ -12,9 +12,9 @@
 # =============================================================
 
 # ---- 1. Pacotes -----------------------------------------------
-library(readr)    # read_csv()
-library(janitor)  # clean_names()
-library(stringr)  # str_extract()
+library(readr)
+library(janitor)
+library(stringr)
 
 # ---- 2. Localizar o arquivo mais recente ----------------------
 arquivos <- list.files(
