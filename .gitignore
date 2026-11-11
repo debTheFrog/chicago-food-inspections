@@ -7,3 +7,7 @@
 
 # Dados (grandes e públicos; ver README)
 dados/
+
+# Saídas geradas pelo Quarto
+analises/*.html
+analises/*_files/

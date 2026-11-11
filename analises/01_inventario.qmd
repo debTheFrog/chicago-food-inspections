@@ -1,0 +1,474 @@
+---
+title: "Inventário dos dados brutos"
+subtitle: "Food Inspections — City of Chicago"
+lang: pt
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    embed-resources: true
+    df-print: kable
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: preparacao
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(lubridate)
+library(ggplot2)
+library(janitor)
+
+# Mesmo critério do 01_ler.R: o CSV mais recente é a versão analisada
+arquivo_bruto <- max(list.files(
+  "../dados/brutos",
+  pattern = "^food_inspections_\\d{4}-\\d{2}-\\d{2}\\.csv$"
+))
+data_dados <- as.Date(str_extract(arquivo_bruto, "\\d{4}-\\d{2}-\\d{2}"))
+
+# clean_names() só aqui dentro, para facilitar a escrita.
+# Nada deste documento é salvo: o inventário só lê.
+inspecoes <- readRDS("../dados/processados/inspecoes_lidas.rds") %>%
+  clean_names()
+
+n_total <- nrow(inspecoes)
+
+# Formatação de números no padrão brasileiro
+num <- function(x) format(x, big.mark = ".", decimal.mark = ",", trim = TRUE)
+pct <- function(x) paste0(format(round(100 * x, 1), decimal.mark = ","), "%")
+```
+
+Versão analisada: **`r arquivo_bruto`** (baixado em `r format(data_dados, "%d/%m/%Y")`), com **`r num(n_total)`** inspeções.
+
+Este documento só descreve os dados. Nenhuma limpeza é aplicada e nada é salvo. Cada bloco termina com um achado que alimenta uma decisão em `notas/decisoes.md`.
+
+# Bloco 1 — Visão geral
+
+**Pergunta:** o que eu tenho em mãos?
+
+```{r}
+#| label: visao-geral
+
+dim(inspecoes)
+glimpse(inspecoes)
+```
+
+> **Achado:**
+
+# Bloco 2 — Faltantes
+
+**Pergunta:** que colunas são confiáveis?
+
+O `read_csv()` transforma campos vazios em `NA`. A coluna `vazio` confere se sobrou algum texto em branco.
+
+```{r}
+#| label: faltantes
+
+faltantes <- inspecoes %>%
+  summarise(across(
+    everything(),
+    list(
+      na    = ~ sum(is.na(.x)),
+      vazio = ~ sum(str_trim(.x) == "", na.rm = TRUE)
+    )
+  )) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("coluna", ".value"),
+    names_pattern = "(.*)_(na|vazio)$"
+  ) %>%
+  mutate(pct_faltante = pct((na + vazio) / n_total)) %>%
+  arrange(desc(na + vazio))
+
+faltantes
+```
+
+**`violations` vazio quer dizer "sem violação" ou "não registrado"?** Se Fail quase nunca vem vazio, vazio provavelmente significa "nenhuma violação encontrada".
+
+```{r}
+#| label: violations-vazio
+
+inspecoes %>%
+  mutate(sem_texto = is.na(violations) | str_trim(violations) == "") %>%
+  group_by(results) %>%
+  summarise(
+    n         = n(),
+    n_vazio   = sum(sem_texto),
+    pct_vazio = pct(mean(sem_texto))
+  ) %>%
+  arrange(desc(n))
+```
+
+> **Achado:** (→ D7)
+
+# Bloco 3 — Datas e período
+
+**Pergunta:** que período os dados cobrem, e há buracos?
+
+A coluna `data` existe só neste documento. A conversão oficial é feita no `02_limpar.R`.
+
+```{r}
+#| label: datas
+
+inspecoes <- inspecoes %>%
+  mutate(data = mdy(inspection_date, quiet = TRUE))
+
+tibble(
+  datas_que_faltam   = sum(is.na(inspecoes$data)),
+  primeira           = min(inspecoes$data, na.rm = TRUE),
+  ultima             = max(inspecoes$data, na.rm = TRUE)
+)
+```
+
+```{r}
+#| label: datas-por-mes
+#| fig-width: 9
+#| fig-height: 4
+
+por_mes <- inspecoes %>%
+  count(mes = floor_date(data, "month"))
+
+ggplot(por_mes, aes(mes, n)) +
+  geom_line() +
+  geom_vline(xintercept = as.Date("2018-07-01"), linetype = "dashed") +
+  annotate("text", x = as.Date("2018-07-01"), y = max(por_mes$n),
+           label = " mudança de procedimentos (07/2018)", hjust = 0, size = 3) +
+  labs(x = NULL, y = "Inspeções no mês",
+       title = "Inspeções por mês") +
+  theme_minimal()
+```
+
+```{r}
+#| label: datas-por-ano
+
+inspecoes %>%
+  count(ano = year(data))
+```
+
+Os últimos meses mostram se o mês mais recente está incompleto:
+
+```{r}
+#| label: ultimos-meses
+
+tail(por_mes, 4)
+```
+
+> **Achado:** (→ D1)
+
+# Bloco 4 — Variáveis categóricas
+
+**Pergunta:** que valores cada categoria assume, e com que frequência?
+
+```{r}
+#| label: categoricas-resumo
+
+# Quantos valores um campo precisa para cobrir 95% das linhas
+valores_para_95 <- function(x) {
+  freq <- sort(table(x, useNA = "ifany"), decreasing = TRUE)
+  unname(which(cumsum(freq) / sum(freq) >= 0.95)[1])
+}
+
+categoricas <- c("results", "inspection_type", "risk",
+                 "facility_type", "city", "state")
+
+tibble(
+  coluna             = categoricas,
+  valores_distintos  = sapply(inspecoes[categoricas], n_distinct),
+  sem_maiusc_espacos = sapply(inspecoes[categoricas],
+                              \(x) n_distinct(str_to_upper(str_squish(x)))),
+  valores_para_95pct = sapply(inspecoes[categoricas], valores_para_95)
+)
+```
+
+`sem_maiusc_espacos` conta os valores distintos depois de ignorar maiúsculas e espaços extras. A diferença para `valores_distintos` mostra quantas variações são só de digitação.
+
+## Resultados
+
+```{r}
+#| label: results
+
+inspecoes %>%
+  count(results, sort = TRUE) %>%
+  mutate(pct = pct(n / n_total))
+```
+
+## Risco
+
+```{r}
+#| label: risk
+
+inspecoes %>%
+  count(risk, sort = TRUE) %>%
+  mutate(pct = pct(n / n_total))
+```
+
+## Tipo de inspeção (15 mais frequentes)
+
+```{r}
+#| label: inspection-type
+
+inspecoes %>%
+  count(inspection_type, sort = TRUE) %>%
+  mutate(pct = pct(n / n_total)) %>%
+  head(15)
+```
+
+## Tipo de estabelecimento (15 mais frequentes)
+
+```{r}
+#| label: facility-type
+
+inspecoes %>%
+  count(facility_type, sort = TRUE) %>%
+  mutate(pct = pct(n / n_total)) %>%
+  head(15)
+```
+
+## Cidade e estado
+
+```{r}
+#| label: city-state
+
+inspecoes %>%
+  count(city, state, sort = TRUE) %>%
+  head(15)
+```
+
+## 4b — Cruzamentos de consistência
+
+**Pergunta:** há combinações que não deveriam existir?
+
+Resultado por tipo de inspeção (6 tipos mais frequentes):
+
+```{r}
+#| label: tipo-x-resultado
+
+tipos_principais <- inspecoes %>%
+  count(inspection_type, sort = TRUE) %>%
+  head(6) %>%
+  pull(inspection_type)
+
+inspecoes %>%
+  filter(inspection_type %in% tipos_principais) %>%
+  count(inspection_type, results) %>%
+  pivot_wider(names_from = results, values_from = n, values_fill = 0)
+```
+
+"Chicago" fora de Illinois, ou estado vazio:
+
+```{r}
+#| label: chicago-fora-il
+
+inspecoes %>%
+  filter(str_detect(str_to_upper(city), "CHICAGO"), state != "IL" | is.na(state)) %>%
+  count(city, state, sort = TRUE)
+```
+
+Risco por tipo de estabelecimento (8 tipos mais frequentes). O mesmo tipo com riscos diferentes indica que o risco é atribuído por estabelecimento, não por tipo:
+
+```{r}
+#| label: tipo-x-risco
+
+estab_principais <- inspecoes %>%
+  count(facility_type, sort = TRUE) %>%
+  head(8) %>%
+  pull(facility_type)
+
+inspecoes %>%
+  filter(facility_type %in% estab_principais) %>%
+  count(facility_type, risk) %>%
+  pivot_wider(names_from = risk, values_from = n, values_fill = 0)
+```
+
+> **Achado:** (→ D2, D3, D5, D8)
+
+# Bloco 5 — Identificadores
+
+**Pergunta:** o que identifica uma inspeção, e o que identifica um estabelecimento?
+
+```{r}
+#| label: ids
+
+tibble(
+  n_inspecoes        = n_total,
+  ids_distintos     = n_distinct(inspecoes$inspection_id),
+  licenca_vazia      = sum(is.na(inspecoes$license_number)),
+  licenca_zero       = sum(inspecoes$license_number == "0", na.rm = TRUE),
+  licencas_distintas = n_distinct(inspecoes$license_number, na.rm = TRUE)
+)
+```
+
+Para cada licença válida: quantos endereços e quantos nomes diferentes aparecem?
+
+```{r}
+#| label: licenca-enderecos-nomes
+
+por_licenca <- inspecoes %>%
+  filter(!is.na(license_number), license_number != "0") %>%
+  group_by(license_number) %>%
+  summarise(
+    n_inspecoes = n(),
+    n_enderecos = n_distinct(address),
+    n_nomes     = n_distinct(dba_name)
+  )
+
+por_licenca %>%
+  count(n_enderecos = pmin(n_enderecos, 4)) %>%
+  mutate(n_enderecos = if_else(n_enderecos == 4, "4 ou mais", as.character(n_enderecos)),
+         pct = pct(n / sum(n)))
+
+por_licenca %>%
+  count(n_nomes = pmin(n_nomes, 4)) %>%
+  mutate(n_nomes = if_else(n_nomes == 4, "4 ou mais", as.character(n_nomes)),
+         pct = pct(n / sum(n)))
+```
+
+E o contrário: quantas licenças diferentes aparecem no mesmo endereço?
+
+```{r}
+#| label: endereco-licencas
+
+inspecoes %>%
+  filter(!is.na(license_number), license_number != "0") %>%
+  group_by(address) %>%
+  summarise(n_licencas = n_distinct(license_number)) %>%
+  count(n_licencas = pmin(n_licencas, 4)) %>%
+  mutate(n_licencas = if_else(n_licencas == 4, "4 ou mais", as.character(n_licencas)),
+         pct = pct(n / sum(n)))
+```
+
+Duplicatas disfarçadas: mesma licença, data, tipo e resultado, mas com IDs diferentes.
+
+```{r}
+#| label: duplicatas
+
+dup <- inspecoes %>%
+  filter(!is.na(license_number), license_number != "0") %>%
+  count(license_number, inspection_date, inspection_type, results) %>%
+  filter(n > 1)
+
+tibble(
+  grupos_repetidos   = nrow(dup),
+  linhas_envolvidas  = sum(dup$n),
+  linhas_excedentes  = sum(dup$n - 1)
+)
+```
+
+> **Achado:** (→ D4)
+
+# Bloco 6 — Geografia
+
+**Pergunta:** dá para colocar as inspeções no mapa?
+
+Caixa aproximada de Chicago: latitude entre 41,6 e 42,1; longitude entre −87,95 e −87,5.
+
+```{r}
+#| label: geografia
+
+geo <- inspecoes %>%
+  mutate(
+    lat = as.numeric(latitude),
+    lon = as.numeric(longitude)
+  )
+
+tibble(
+  sem_coordenada  = sum(is.na(geo$lat) | is.na(geo$lon)),
+  pct_sem_coord   = pct(mean(is.na(geo$lat) | is.na(geo$lon))),
+  fora_de_chicago = sum(!is.na(geo$lat) & !is.na(geo$lon) &
+                        (geo$lat < 41.6 | geo$lat > 42.1 |
+                         geo$lon < -87.95 | geo$lon > -87.5))
+)
+```
+
+> **Achado:** (→ D8)
+
+# Bloco 7 — Formato das violações
+
+**Pergunta:** como separar o texto de `violations` em linhas, e o formato mudou em 07/2018?
+
+Cada violação é separada por `|`, então o número de violações é o número de `|` mais 1.
+
+```{r}
+#| label: violacoes-contagem
+
+violacoes <- inspecoes %>%
+  filter(!is.na(violations), !is.na(data)) %>%
+  mutate(
+    periodo       = if_else(data < as.Date("2018-07-01"), "antes de 07/2018", "a partir de 07/2018"),
+    n_violacoes   = str_count(violations, fixed("|")) + 1,
+    primeiro_num  = as.integer(str_extract(violations, "^\\d+"))
+  )
+
+violacoes %>%
+  group_by(periodo) %>%
+  summarise(
+    inspecoes          = n(),
+    media_violacoes    = round(mean(n_violacoes), 1),
+    mediana_violacoes  = median(n_violacoes),
+    max_violacoes      = max(n_violacoes),
+    menor_numero       = min(primeiro_num, na.rm = TRUE),
+    maior_numero       = max(primeiro_num, na.rm = TRUE),
+    sem_numero_inicial = sum(is.na(primeiro_num))
+  )
+```
+
+Exemplos de cada período (início do texto):
+
+```{r}
+#| label: violacoes-exemplos
+
+set.seed(2026)
+
+violacoes %>%
+  group_by(periodo) %>%
+  slice_sample(n = 3) %>%
+  ungroup() %>%
+  transmute(periodo, inicio = str_trunc(violations, 250))
+```
+
+> **Achado:** (→ D1, script 03)
+
+# Bloco 8 — Reinspeções
+
+**Pergunta:** quantas inspeções são reinspeções, e de que tipo?
+
+O cálculo dos dias entre o Fail e a reinspeção fica para as views SQL (fase 6).
+
+```{r}
+#| label: reinspecoes
+
+reinsp <- inspecoes %>%
+  filter(str_detect(str_to_lower(inspection_type), "re-?insp"))
+
+tibble(
+  reinspecoes = nrow(reinsp),
+  pct_do_total = pct(nrow(reinsp) / n_total)
+)
+
+reinsp %>%
+  count(inspection_type, sort = TRUE) %>%
+  head(10)
+
+reinsp %>%
+  count(results, sort = TRUE) %>%
+  mutate(pct = pct(n / sum(n)))
+```
+
+> **Achado:** (→ D6)
+
+# Achados
+
+| \#  | Achado (com número) | Decisão |
+|-----|---------------------|---------|
+| 1   |                     | D1      |
+| 2   |                     | D2      |
+| 3   |                     | D3      |
+| 4   |                     | D4      |
+| 5   |                     | D5      |
+| 6   |                     | D6      |
+| 7   |                     | D7      |
+| 8   |                     | D8      |
